@@ -1,0 +1,11 @@
+{
+	"id": "habit-tracker",
+	"name": "Habit Tracker",
+	"version": "1.0.0",
+	"minAppVersion": "0.15.0",
+	"description": "Track your daily habits with a beautiful calendar interface and advanced analytics dashboard. Features heatmaps, streak tracking, and detailed statistics.",
+	"author": "Your Name",
+	"authorUrl": "https://github.com/YOUR_USERNAME",
+	"fundingUrl": "https://github.com/YOUR_USERNAME/obsidian-habit-tracker",
+	"isDesktopOnly": false
+}
