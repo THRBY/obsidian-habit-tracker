@@ -43,7 +43,8 @@ class LocalizationManager {
     static currentLocale = null;
     
     static detectLocale() {
-        // Определяем язык из интерфейса Obsidian
+        // Определяем язык из интерфейса Obsidian — всегда перечитываем, чтобы
+        // реагировать на смену языка в настройках Obsidian без перезагрузки плагина
         try {
             // @ts-ignore - moment.locale() доступен в Obsidian
             const obsidianLocale = window.moment?.locale() || 'en';
@@ -55,9 +56,8 @@ class LocalizationManager {
     }
     
     static t(key) {
-        if (!this.currentLocale) {
-            this.detectLocale();
-        }
+        // Всегда перечитываем локаль — ловим смену языка в Obsidian на лету
+        this.detectLocale();
         
         const translations = this.translations[this.currentLocale] || this.translations['en'];
         return translations[key] || key;
@@ -555,8 +555,15 @@ class StatsCalculator {
         let longestStreak = 0;
         let tempStreak = 0;
 
+        // Если последний день периода (сегодня) ещё не выполнен — начинаем со предпоследнего
+        const today = DateUtils.formatDate(new Date());
+        const lastPeriodDate = allDates[allDates.length - 1];
+        const startStreakIdx = (lastPeriodDate === today && !completedDatesSet.has(today))
+            ? allDates.length - 2
+            : allDates.length - 1;
+
         // Текущая серия: от конца к началу
-        for (let i = allDates.length - 1; i >= 0; i--) {
+        for (let i = startStreakIdx; i >= 0; i--) {
             if (completedDatesSet.has(allDates[i])) {
                 currentStreak++;
             } else {
@@ -602,7 +609,13 @@ class StatsCalculator {
         let longestStreak = 0;
         let tempStreak = 0;
         
-        for (let i = allDates.length - 1; i >= 0; i--) {
+        // Если сегодня ещё не выполнено — начинаем серию со вчера,
+        // чтобы серия не обнулялась до конца текущего дня
+        const lastIdx = completedDates.has(today)
+            ? allDates.length - 1
+            : allDates.length - 2;
+
+        for (let i = lastIdx; i >= 0; i--) {
             if (completedDates.has(allDates[i])) {
                 currentStreak++;
             } else {
@@ -676,8 +689,14 @@ class HabitManager {
 
     getHabitsByDate(date) {
         return this.data.habits.filter(h => {
-            // Исключаем неактивные привычки
-            if (h.status === HabitStatus.AUTOMATED || h.status === HabitStatus.OBSOLETE) {
+            // Исключаем все неактивные статусы из отображения в календаре
+            if (
+                h.status === HabitStatus.AUTOMATED ||
+                h.status === HabitStatus.OBSOLETE  ||
+                h.status === HabitStatus.ACHIEVED  ||
+                h.status === HabitStatus.CANCELLED ||
+                h.status === HabitStatus.FAILED
+            ) {
                 return false;
             }
             if (date < h.startDate) return false;
@@ -951,7 +970,11 @@ class DashboardView extends ItemView {
         super(leaf);
         this.plugin = plugin;
         this.selectedPeriod = 30;
-        this.selectedStatus = 'all';
+        this.selectedStatus = HabitStatus.ACTIVE; // по умолчанию — только активные
+        // Выбранный месяц для дашборда
+        const now = new Date();
+        this.dashboardMonth = now.getMonth();
+        this.dashboardYear = now.getFullYear();
     }
 
     getViewType() {
@@ -979,7 +1002,38 @@ class DashboardView extends ItemView {
 
         container.createEl('h1', { text: '📊 Дашборд привычек' });
 
-        // Фильтры убраны для упрощения интерфейса
+        // --- Навигация по месяцам ---
+        const monthNav = container.createDiv('dashboard-month-nav');
+        const prevMonthBtn = monthNav.createEl('button', { text: '◀', cls: 'month-nav-btn' });
+        prevMonthBtn.onclick = () => {
+            if (this.dashboardMonth === 0) {
+                this.dashboardMonth = 11;
+                this.dashboardYear--;
+            } else {
+                this.dashboardMonth--;
+            }
+            this.render();
+        };
+        const monthLabel = monthNav.createDiv('month-nav-label');
+        monthLabel.setText(`${DateUtils.getMonthName(this.dashboardMonth)} ${this.dashboardYear}`);
+        const nextMonthBtn = monthNav.createEl('button', { text: '▶', cls: 'month-nav-btn' });
+        nextMonthBtn.onclick = () => {
+            if (this.dashboardMonth === 11) {
+                this.dashboardMonth = 0;
+                this.dashboardYear++;
+            } else {
+                this.dashboardMonth++;
+            }
+            this.render();
+        };
+        const todayMonthBtn = monthNav.createEl('button', { text: 'Текущий', cls: 'month-nav-today-btn' });
+        todayMonthBtn.onclick = () => {
+            const now = new Date();
+            this.dashboardMonth = now.getMonth();
+            this.dashboardYear = now.getFullYear();
+            this.render();
+        };
+
         this.renderOverallStats(container);
         this.renderMonthlyHeatmap(container);
         this.renderDeepAnalytics(container);
@@ -992,14 +1046,23 @@ class DashboardView extends ItemView {
         section.createEl('h2', { text: 'Ключевые показатели (месяц)' });
 
         const habits = this.plugin.habitManager.getAllHabits();
-        const activeHabits = habits.filter(h => h.status === HabitStatus.ACTIVE);
+        const activeHabits    = habits.filter(h => h.status === HabitStatus.ACTIVE);
         const automatedHabits = habits.filter(h => h.status === HabitStatus.AUTOMATED);
+        const achievedHabits  = habits.filter(h => h.status === HabitStatus.ACHIEVED);
+        const obsoleteHabits  = habits.filter(h => h.status === HabitStatus.OBSOLETE);
+        const cancelledHabits = habits.filter(h => h.status === HabitStatus.CANCELLED);
+        const failedHabits    = habits.filter(h => h.status === HabitStatus.FAILED);
 
         const grid = section.createDiv('stats-grid-overview');
 
-        this.createStatCard(grid, 'Всего привычек', habits.length.toString(), 'all', 'all');
-        this.createStatCard(grid, 'Активных', activeHabits.length.toString(), HabitStatus.ACTIVE, 'active');
-        this.createStatCard(grid, 'Автоматизированных', automatedHabits.length.toString(), HabitStatus.AUTOMATED, 'automated');
+        // При клике "Всего" — показываем ВСЕ привычки (selectedStatus = 'all')
+        this.createStatCard(grid, 'Всего привычек',       habits.length.toString(),          'all',                    'all');
+        this.createStatCard(grid, '🟢 Активных',          activeHabits.length.toString(),    HabitStatus.ACTIVE,       'active');
+        this.createStatCard(grid, '🤖 Автоматизированных',automatedHabits.length.toString(), HabitStatus.AUTOMATED,    'automated');
+        this.createStatCard(grid, '✅ Цель достигнута',   achievedHabits.length.toString(),  HabitStatus.ACHIEVED,     'achieved');
+        this.createStatCard(grid, '📦 Устарело',          obsoleteHabits.length.toString(),  HabitStatus.OBSOLETE,     'obsolete');
+        this.createStatCard(grid, '🚫 Отменено',          cancelledHabits.length.toString(), HabitStatus.CANCELLED,    'cancelled');
+        this.createStatCard(grid, '❌ Не получилось',     failedHabits.length.toString(),    HabitStatus.FAILED,       'failed');
 
         const monthlyProgress = this.calculateMonthlyProgress();
         const progressCard = grid.createDiv('stat-card stat-card-progress');
@@ -1034,11 +1097,11 @@ class DashboardView extends ItemView {
 
         const daysContainer = grid.createDiv('heatmap-days');
 
-        const today = new Date();
-        const year = today.getFullYear();
-        const month = today.getMonth(); // 0-11
+        const year  = this.dashboardYear;
+        const month = this.dashboardMonth;
         const firstDay = new Date(year, month, 1);
-        const lastDay = new Date(year, month + 1, 0);
+        const lastDay  = new Date(year, month + 1, 0);
+        const todayStr = DateUtils.formatDate(new Date());
 
         // смещение, чтобы неделя начиналась с понедельника
         let firstDayOfWeek = firstDay.getDay(); // 0=вс
@@ -1085,7 +1148,6 @@ class DashboardView extends ItemView {
                 dayEl.addClass('heatmap-day-zero');
             }
 
-            const todayStr = DateUtils.formatDate(today);
             if (dateStr === todayStr) {
                 dayEl.addClass('heatmap-day-today');
             }
@@ -1107,9 +1169,9 @@ class DashboardView extends ItemView {
 
         const wrap = section.createDiv('analytics-grid');
 
-        // ==== 1) Средний прогресс по дням недели (текущий месяц) ====
+        // ==== 1) Средний прогресс по дням текущей недели ====
         const weekdayCard = wrap.createDiv('analytics-card');
-        weekdayCard.createEl('h3', { text: 'Средний прогресс по дням недели' });
+        weekdayCard.createEl('h3', { text: 'Прогресс по дням текущей недели' });
         const weekdayBars = weekdayCard.createDiv('weekday-vertical-bars');
 
         const weekdayStats = this.calculateWeekdayAveragesForMonth(); // [{label, percent}]
@@ -1270,27 +1332,36 @@ class DashboardView extends ItemView {
         const section = container.createDiv('dashboard-habit-cards');
         section.createEl('h2', { text: '4. Детализация по привычкам (Habit-by-Habit View)' });
 
-        // Применяем фильтр статуса если выбран
+        // Применяем фильтр статуса
         let habits = this.plugin.habitManager.getAllHabits();
         if (this.selectedStatus && this.selectedStatus !== 'all') {
             habits = habits.filter(h => h.status === this.selectedStatus);
         }
+        // Если выбрано 'all' — показываем все привычки (без фильтрации по статусу)
 
-        // Показываем только активные привычки по умолчанию
-        if (this.selectedStatus === 'all') {
-            habits = habits.filter(h => h.status === HabitStatus.ACTIVE);
-        }
+        // Сортируем: сначала по статусу (active первые), потом по проценту выполнения (desc)
+        const statusOrder = {
+            [HabitStatus.ACTIVE]: 0,
+            [HabitStatus.AUTOMATED]: 1,
+            [HabitStatus.ACHIEVED]: 2,
+            [HabitStatus.OBSOLETE]: 3,
+            [HabitStatus.CANCELLED]: 4,
+            [HabitStatus.FAILED]: 5
+        };
 
-        // Сортируем по проценту выполнения (desc)
         const habitsWithStats = habits.map(habit => {
             const completions = this.plugin.habitManager.getCompletionsForHabit(habit.id);
             const stats = StatsCalculator.calculateStats(habit, completions);
             const lifetime = StatsCalculator.getLifetimeDays(habit);
             return { habit, stats, lifetime };
-        }).sort((a, b) => b.stats.completionRate - a.stats.completionRate);
+        }).sort((a, b) => {
+            const orderDiff = (statusOrder[a.habit.status] ?? 9) - (statusOrder[b.habit.status] ?? 9);
+            if (orderDiff !== 0) return orderDiff;
+            return b.stats.completionRate - a.stats.completionRate;
+        });
 
         if (habitsWithStats.length === 0) {
-            section.createDiv('no-habits').setText('Нет активных привычек для отображения');
+            section.createDiv('no-habits').setText('Нет привычек для отображения');
             return;
         }
 
@@ -1357,15 +1428,19 @@ class DashboardView extends ItemView {
     }
 
     calculateWeekdayAveragesForMonth() {
+        // Показываем прогресс только по текущей календарной неделе (Пн → сегодня)
         const today = new Date();
-        const year = today.getFullYear();
-        const month = today.getMonth();
-        const monthStart = new Date(year, month, 1);
-        const monthEnd = new Date(year, month + 1, 0);
+        const todayStr = DateUtils.formatDate(today);
 
-        const startStr = DateUtils.formatDate(monthStart);
-        const endStr = DateUtils.formatDate(monthEnd);
-        const dates = DateUtils.getDateRange(startStr, endStr);
+        // Определяем начало текущей недели (понедельник)
+        const dayOfWeek = today.getDay(); // 0=вс
+        const mondayOffset = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+        const weekStart = new Date(today);
+        weekStart.setDate(today.getDate() - mondayOffset);
+        const startStr = DateUtils.formatDate(weekStart);
+
+        // Дни от понедельника до сегодня включительно
+        const dates = DateUtils.getDateRange(startStr, todayStr);
 
         // Пн..Вс
         const labels = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
@@ -1408,15 +1483,14 @@ class DashboardView extends ItemView {
     }
 
     calculateMonthlyCompletionTrend() {
-        const today = new Date();
-        const year = today.getFullYear();
-        const month = today.getMonth();
+        const year  = this.dashboardYear;
+        const month = this.dashboardMonth;
         const monthStart = new Date(year, month, 1);
-        const monthEnd = new Date(year, month + 1, 0);
+        const monthEnd   = new Date(year, month + 1, 0);
 
         const startStr = DateUtils.formatDate(monthStart);
-        const endStr = DateUtils.formatDate(monthEnd);
-        const dates = DateUtils.getDateRange(startStr, endStr);
+        const endStr   = DateUtils.formatDate(monthEnd);
+        const dates    = DateUtils.getDateRange(startStr, endStr);
 
         return dates.map(dateStr => {
             const d = DateUtils.parseDate(dateStr);
@@ -1441,13 +1515,20 @@ class DashboardView extends ItemView {
         if (cssClass) {
             card.addClass(`stat-card-${cssClass}`);
         }
+        // Подсвечиваем выбранную карточку
+        if (
+            (filterStatus === 'all' && this.selectedStatus === 'all') ||
+            (filterStatus !== 'all' && filterStatus === this.selectedStatus)
+        ) {
+            card.addClass('stat-card-active-filter');
+        }
         card.createDiv('stat-card-value').setText(value);
         card.createDiv('stat-card-label').setText(label);
         
         if (filterStatus !== null) {
             card.style.cursor = 'pointer';
             card.onclick = () => {
-                this.selectedStatus = filterStatus === 'all' ? 'all' : filterStatus;
+                this.selectedStatus = filterStatus;
                 this.render();
             };
         }
@@ -1459,16 +1540,15 @@ class DashboardView extends ItemView {
      * и усредняем по дням, где были привычки.
      */
     calculateMonthlyProgress() {
-        const today = new Date();
-        const year = today.getFullYear();
-        const month = today.getMonth(); // 0-11
+        const year  = this.dashboardYear;
+        const month = this.dashboardMonth;
 
         const monthStart = new Date(year, month, 1);
-        const monthEnd = new Date(year, month + 1, 0);
+        const monthEnd   = new Date(year, month + 1, 0);
 
         const startStr = DateUtils.formatDate(monthStart);
-        const endStr = DateUtils.formatDate(monthEnd);
-        const dates = DateUtils.getDateRange(startStr, endStr);
+        const endStr   = DateUtils.formatDate(monthEnd);
+        const dates    = DateUtils.getDateRange(startStr, endStr);
 
         let sumDayPercents = 0;
         let daysWithHabits = 0;
@@ -1728,6 +1808,10 @@ class HabitModal extends Modal {
                     new Notice('Укажите название привычки');
                     return;
                 }
+                if (endDate && startDate && endDate < startDate) {
+                    new Notice('Дата окончания не может быть раньше даты начала');
+                    return;
+                }
                 if (this.habit) {
                     this.plugin.habitManager.updateHabit(this.habit.id, {
                         name, description, icon, color, startDate,
@@ -1833,10 +1917,10 @@ class HabitDetailsModal extends Modal {
             .setName('Статус привычки')
             .addDropdown(dropdown => {
                 dropdown
-                    .addOption(HabitStatus.ACTIVE, 'Активная')
-                    .addOption(HabitStatus.AUTOMATED, 'Автоматизирована')
+                    .addOption(HabitStatus.ACTIVE, '🟢 Активная')
+                    .addOption(HabitStatus.AUTOMATED, '🤖 Автоматизирована')
                     .addOption(HabitStatus.ACHIEVED, '✅ Цель достигнута')
-                    .addOption(HabitStatus.OBSOLETE, 'Устарела')
+                    .addOption(HabitStatus.OBSOLETE, '📦 Устарела')
                     .addOption(HabitStatus.CANCELLED, '🚫 Отменена')
                     .addOption(HabitStatus.FAILED, '❌ Не получилось')
                     .setValue(habit.status)
